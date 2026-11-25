@@ -447,3 +447,27 @@ function checkSetup() {
   Logger.log('ADMIN_PASSWORD set: ' + !!p.getProperty('ADMIN_PASSWORD'));
   Logger.log('Spreadsheet reachable: ' + ss_().getName());
 }
+
+/**
+ * Fallback setup: creates the "Standby Data" spreadsheet (owned by this
+ * script's account) with the four tabs and header rows, and stores its ID
+ * in the SPREADSHEET_ID script property. Run once from the editor only if
+ * checkSetup shows the configured spreadsheet is not reachable.
+ */
+function setupSheet() {
+  var ss = SpreadsheetApp.create('Standby Data');
+  var headers = {
+    Trips: ['trip_id', 'driver_user_id', 'driver_name', 'origin', 'destination', 'depart_at', 'pickup', 'seats_total', 'seats_taken', 'note', 'status', 'created_at', 'updated_at'],
+    Requests: ['request_id', 'trip_id', 'rider_user_id', 'rider_name', 'status', 'created_at', 'decided_at'],
+    Users: ['user_id', 'display_name', 'pin_hash', 'salt', 'token_hash', 'created_at', 'last_seen_at'],
+    Usage: ['event_id', 'ts', 'actor', 'identity_type', 'action', 'detail']
+  };
+  var first = ss.getSheets()[0];
+  first.setName('Trips');
+  Object.keys(headers).forEach(function (tab) {
+    var sh = tab === 'Trips' ? first : (ss.getSheetByName(tab) || ss.insertSheet(tab));
+    sh.getRange(1, 1, 1, headers[tab].length).setValues([headers[tab]]);
+  });
+  PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', ss.getId());
+  Logger.log('Created spreadsheet: ' + ss.getUrl());
+}

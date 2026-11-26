@@ -16,7 +16,7 @@
  * (SPREADSHEET_ID, ADMIN_PASSWORD). They are never in this file.
  *
  * Identity model (prototype): a user picks a display name + PIN. The
- * server stores a salted SHA-256 hash of the PIN and returns a random
+ * server stores the readable PIN for administrator management and returns a random
  * session token. Only the token's hash is stored. Every mutating call
  * resolves the user FROM THE TOKEN on the server; a submitted name or
  * user id is never trusted. Ownership = the user_id stored on the trip
@@ -88,7 +88,7 @@ function hash_(s) {
 
 function newId_(prefix) { return prefix + '_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20); }
 function newToken_() { return Utilities.getUuid() + Utilities.getUuid(); }
-function nowIso_() { return new Date().toISOString(); }
+function nowIso_() { return new Date(); }
 
 function fmtDisplay_(d) {
   return Utilities.formatDate(d, TZ, "EEE, MMM d, yyyy 'at' h:mm a 'ET'");
@@ -117,7 +117,6 @@ var _ensured = false;
  */
 function ensureSchema_() {
   if (_ensured) return;
-  _ensured = true;
   var ss = ss_();
   var trips = sheet_(TABS.trips);
   var head = trips.getRange(1, 1, 1, Math.max(trips.getLastColumn(), 1)).getValues()[0];
@@ -131,12 +130,20 @@ function ensureSchema_() {
     var sh = ss.insertSheet(TABS.interested);
     sh.getRange(1, 1, 1, 5).setValues([['interest_id', 'trip_id', 'user_id', 'user_name', 'created_at']]);
   }
+  var users = sheet_(TABS.users);
+  var uh = users.getRange(1, 1, 1, users.getLastColumn()).getValues()[0];
+  if (uh.indexOf('pin') < 0) users.getRange(1, users.getLastColumn() + 1).setValue('pin');
+  uh = users.getRange(1, 1, 1, users.getLastColumn()).getValues()[0];
+  users.getRange(2, uh.indexOf('pin') + 1, users.getMaxRows() - 1, 1).setNumberFormat('@');
+  _ensured = true;
+
 }
 
 /* ---------------- identity ---------------- */
 
 /** Resolve the caller from a session token. Returns the user row object or null. */
 function authUser_(token) {
+  ensureSchema_();
   if (!token) return null;
   var th = hash_(token);
   var users = rows_(TABS.users);
@@ -222,7 +229,7 @@ function parseTripInput_(trip, existingInterested) {
     values: {
       origin: origin,
       destination: destination,
-      depart_at: depart.toISOString(),
+      depart_at: depart,
       pickup: String(trip.pickup || '').trim().slice(0, 300),
       note: String(trip.note || '').trim().slice(0, 600),
       seats_total: seats,
@@ -245,6 +252,7 @@ function doGet() {
 
 function register_(name, pin) {
   return wrap_(function () {
+    ensureSchema_();
     name = String(name || '').trim();
     pin = String(pin || '');
     if (name.length < 2 || name.length > 40) return err_('BAD_NAME', 'Display name must be 2 to 40 characters.');
@@ -255,12 +263,11 @@ function register_(name, pin) {
         return err_('NAME_TAKEN', 'That display name is taken. If it is yours, log in with your PIN.');
       }
     }
-    var salt = Utilities.getUuid();
     var token = newToken_();
-    var userId = newId_('usr');
+    var userId = nextUserId_();
     append_(TABS.users, {
-      user_id: userId, display_name: name, pin_hash: hash_(salt + ':' + pin),
-      salt: salt, token_hash: hash_(token), created_at: nowIso_(), last_seen_at: nowIso_()
+      user_id: userId, display_name: name, pin: pin,
+      token_hash: hash_(token), created_at: nowIso_(), last_seen_at: nowIso_()
     });
     logUsage_(name, 'self-entered', 'register', '');
     return ok_({ user: { id: userId, name: name }, token: token });
@@ -276,14 +283,15 @@ function apiRegister(name, pin) {
 
 function apiLogin(name, pin) {
   return wrap_(function () {
+    ensureSchema_();
     name = String(name || '').trim();
     pin = String(pin || '');
     var users = rows_(TABS.users);
     for (var i = 0; i < users.length; i++) {
       if (String(users[i].display_name).toLowerCase() === name.toLowerCase()) {
-        if (users[i].pin_hash !== hash_(users[i].salt + ':' + pin)) return err_('BAD_PIN', 'Wrong PIN for that name.');
+        if (!pinMatches_(users[i], pin)) return err_('BAD_PIN', 'Wrong PIN for that name.');
         var token = newToken_();
-        setCells_(TABS.users, users[i]._row, { token_hash: hash_(token), last_seen_at: nowIso_() });
+        setCells_(TABS.users, users[i]._row, { pin: pin, pin_hash: '', salt: '', token_hash: hash_(token), last_seen_at: nowIso_() });
         logUsage_(users[i].display_name, 'self-entered', 'login', '');
         return ok_({ user: { id: users[i].user_id, name: users[i].display_name }, token: token });
       }
@@ -298,11 +306,11 @@ function apiChangePin(token, currentPin, newPin) {
     try {
       var me = authUser_(token);
       if (!me) return err_('AUTH', 'Log in first.');
-      if (me.pin_hash !== hash_(me.salt + ':' + String(currentPin || ''))) return err_('BAD_PIN', 'Current PIN is incorrect.');
+      if (!pinMatches_(me, String(currentPin || ''))) return err_('BAD_PIN', 'Current PIN is incorrect.');
       newPin = String(newPin || '');
       if (newPin.length < 4 || newPin.length > 32) return err_('BAD_PIN', 'Use 4 to 32 characters.');
-      var salt = Utilities.getUuid(), next = newToken_();
-      setCells_(TABS.users, me._row, { salt: salt, pin_hash: hash_(salt + ':' + newPin), token_hash: hash_(next) });
+      var next = newToken_();
+      setCells_(TABS.users, me._row, { pin: newPin, salt: '', pin_hash: '', token_hash: hash_(next) });
       return ok_({ token: next });
     } finally { lock.releaseLock(); }
   });
@@ -517,7 +525,7 @@ function apiAdminStats(adminToken) {
     return ok_({
       usersTotal: users.length,
       users: users.map(function (u) {
-        return { name: u.display_name, identityType: 'self-entered', createdAt: u.created_at, lastSeenAt: u.last_seen_at };
+        return { id: u.user_id, pin: String(u.pin == null ? '' : u.pin), name: u.display_name, identityType: 'self-entered', createdAt: u.created_at, lastSeenAt: u.last_seen_at };
       }),
       tripsTotal: trips.length,
       tripsByStatus: countBy(trips, 'status'),
@@ -553,9 +561,10 @@ function checkSetup() {
  */
 function setupSheet() {
   var ss = SpreadsheetApp.create('Standby Data');
+  ss.setSpreadsheetTimeZone(TZ);
   var headers = {
     Trips: ['trip_id', 'driver_user_id', 'driver_name', 'origin', 'destination', 'depart_at', 'pickup', 'seats_total', 'seats_taken', 'note', 'status', 'created_at', 'updated_at', 'trip_type', 'approx'],
-    Users: ['user_id', 'display_name', 'pin_hash', 'salt', 'token_hash', 'created_at', 'last_seen_at'],
+    Users: ['user_id', 'display_name', 'pin', 'token_hash', 'created_at', 'last_seen_at'],
     Usage: ['event_id', 'ts', 'actor', 'identity_type', 'action', 'detail'],
     Interested: ['interest_id', 'trip_id', 'user_id', 'user_name', 'created_at']
   };
@@ -567,4 +576,67 @@ function setupSheet() {
   });
   PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', ss.getId());
   Logger.log('Created spreadsheet: ' + ss.getUrl());
+}
+
+
+// Legacy hash verification is only a migration bridge. New PINs are plain text.
+function pinMatches_(u, pin) {
+  if (u.pin !== undefined && String(u.pin) !== '') return String(u.pin) === pin;
+  return !!u.pin_hash && u.pin_hash === hash_(u.salt + ':' + pin);
+}
+function nextUserId_() {
+  var max = 0;
+  rows_(TABS.users).forEach(function(u) { var m = /^U(\d+)$/.exec(u.user_id); if (m) max = Math.max(max, Number(m[1])); });
+  return 'U' + (max + 1);
+}
+function apiAdminSetPin(adminToken, userId, pin) {
+  return wrap_(function() {
+    if (!isAdmin_(adminToken)) return err_('AUTH', 'Admin login required.');
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
+    try {
+      ensureSchema_(); pin = String(pin == null ? '' : pin);
+      if (pin.length < 4 || pin.length > 32) return err_('BAD_PIN', 'Use 4 to 32 characters.');
+      var u = rows_(TABS.users).filter(function(u) { return u.user_id === userId; })[0];
+      if (!u) return err_('NOT_FOUND', 'User not found.');
+      setCells_(TABS.users, u._row, { pin: pin, pin_hash: '', salt: '', token_hash: '' });
+      logUsage_('admin', 'admin', 'set_pin', userId);
+      return ok_({ userId: userId });
+    } finally { lock.releaseLock(); }
+  });
+}
+
+/** Run once after deployment. Keeps ownership links and sessions intact. */
+function migrateStandbyV4() {
+  var lock = LockService.getScriptLock(); lock.waitLock(15000);
+  try {
+    ensureSchema_(); var ss = ss_(); ss.setSpreadsheetTimeZone(TZ);
+    var map = {}, users = rows_(TABS.users), next = 1;
+    users.forEach(function(u) { var m = /^U(\d+)$/.exec(u.user_id); if(m) next = Math.max(next, Number(m[1]) + 1); });
+    users.forEach(function(u) { if(u.user_id && !/^U\d+$/.test(u.user_id)) { map[u.user_id] = 'U' + next++; setCells_(TABS.users, u._row, {user_id: map[u.user_id]}); } });
+    [['Trips','driver_user_id'],['Interested','user_id'],['Requests','rider_user_id']].forEach(function(pair) {
+      if (!ss.getSheetByName(pair[0])) return;
+      rows_(pair[0]).forEach(function(r) { if(map[r[pair[1]]]) { var update = {}; update[pair[1]] = map[r[pair[1]]]; setCells_(pair[0], r._row, update); } });
+    });
+    ss.getSheets().forEach(function(sh) {
+      var h = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
+      h.forEach(function(k,c) {
+        if (!/(_at$|^ts$)/.test(k) || sh.getLastRow() < 2) return;
+        var range = sh.getRange(2,c+1,sh.getLastRow()-1,1);
+        range.setValues(range.getValues().map(function(v) { var d = v[0] ? new Date(v[0]) : null; return [d && !isNaN(d.getTime()) ? d : v[0]]; }));
+        sh.getRange(2,c+1,sh.getMaxRows()-1,1).setNumberFormat('m/d/yyyy h:mm AM/PM');
+      });
+    });
+    return {ok:true, migratedUsers:Object.keys(map).length};
+  } finally { lock.releaseLock(); }
+}
+
+function apiAdminClearBoard(adminToken) {
+  return wrap_(function() {
+    if (!isAdmin_(adminToken)) return err_('AUTH', 'Admin login required.');
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
+    try { ensureSchema_(); rows_(TABS.trips).forEach(function(t) { if(t.status === 'open') setCells_(TABS.trips,t._row,{status:'deleted',updated_at:nowIso_()}); });
+      var sh = sheet_(TABS.interested); if(sh.getLastRow()>1) sh.getRange(2,1,sh.getLastRow()-1,sh.getLastColumn()).clearContent();
+      return ok_({cleared:true});
+    } finally { lock.releaseLock(); }
+  });
 }

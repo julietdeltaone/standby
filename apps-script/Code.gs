@@ -2,20 +2,28 @@
  * Standby — backend (Google Apps Script, V8)
  * Trip-sharing for friends in the North Country.
  *
+ * SIMPLIFIED MODEL (v3, Nov 25, 2026):
+ *   Standby is a read-only trip board. Someone posts a trip; viewers see
+ *   who is going where and when, and contact the driver outside the app.
+ *   The ONLY interaction is an "Interested" toggle: one per signed-in user
+ *   per trip, on/off. Interested marks are what fill seats:
+ *   seats left = seats total minus interested count. There is no request,
+ *   approval, or contact-exchange system.
+ *
  * Data lives in the "Standby Data" Google Sheet with tabs:
- *   Trips, Requests, Users, Usage
+ *   Trips, Users, Usage, Interested (Requests is legacy, unused by v3)
  * The spreadsheet ID and the admin password live in Script Properties
  * (SPREADSHEET_ID, ADMIN_PASSWORD). They are never in this file.
  *
- * Identity model (v1 prototype):
- *   A user picks a display name + PIN. The server stores a salted SHA-256
- *   hash of the PIN and returns a random session token. Only the token's
- *   hash is stored. Every mutating call resolves the user FROM THE TOKEN
- *   on the server; a submitted name or user id is never trusted.
- *   Ownership = the user_id stored on the trip/request row must equal the
- *   token's user_id. Identity type for stats: "self-entered" (name+PIN).
- *   Visitors who never register are "anonymous". There is no verified
- *   identity in v1 (the web app is open to anyone with the link).
+ * Identity model (prototype): a user picks a display name + PIN. The
+ * server stores a salted SHA-256 hash of the PIN and returns a random
+ * session token. Only the token's hash is stored. Every mutating call
+ * resolves the user FROM THE TOKEN on the server; a submitted name or
+ * user id is never trusted. Ownership = the user_id stored on the trip
+ * row must equal the token's user_id. Identity type for stats:
+ * "self-entered" (name+PIN). Visitors who never register are
+ * "anonymous". There is no verified identity (the web app is open to
+ * anyone with the link).
  *
  * All api* functions return { ok: true, data: ... } or
  * { ok: false, code: 'SOME_CODE', error: 'human message' }.
@@ -23,7 +31,7 @@
  */
 
 var TZ = 'America/New_York';
-var TABS = { trips: 'Trips', requests: 'Requests', users: 'Users', usage: 'Usage' };
+var TABS = { trips: 'Trips', users: 'Users', usage: 'Usage', interested: 'Interested' };
 
 /* ---------------- plumbing ---------------- */
 
@@ -99,6 +107,34 @@ function ok_(data) { return { ok: true, data: JSON.parse(JSON.stringify(data)) }
 function err_(code, message) { return { ok: false, code: code, error: message }; }
 function wrap_(fn) { try { return fn(); } catch (e) { return err_('SERVER', String(e && e.message || e)); } }
 
+/* ---------------- schema (self-healing) ---------------- */
+
+var _ensured = false;
+/**
+ * v3 added two Trips columns (trip_type, approx) and an Interested tab.
+ * Older sheets do not have them, so the first call in each execution
+ * creates whatever is missing. Idempotent and cheap after the first run.
+ */
+function ensureSchema_() {
+  if (_ensured) return;
+  _ensured = true;
+  var ss = ss_();
+  var trips = sheet_(TABS.trips);
+  var head = trips.getRange(1, 1, 1, Math.max(trips.getLastColumn(), 1)).getValues()[0];
+  ['trip_type', 'approx'].forEach(function (col) {
+    if (head.indexOf(col) < 0) {
+      trips.getRange(1, trips.getLastColumn() + 1).setValue(col);
+      head.push(col);
+    }
+  });
+  if (!ss.getSheetByName(TABS.interested)) {
+    var sh = ss.insertSheet(TABS.interested);
+    sh.getRange(1, 1, 1, 5).setValues([['interest_id', 'trip_id', 'user_id', 'user_name', 'created_at']]);
+  }
+}
+
+/* ---------------- identity ---------------- */
+
 /** Resolve the caller from a session token. Returns the user row object or null. */
 function authUser_(token) {
   if (!token) return null;
@@ -113,24 +149,86 @@ function authUser_(token) {
   return null;
 }
 
-function publicTrip_(t, myUserId, myReqByTrip) {
+/* ---------------- trips ---------------- */
+
+/** Map trip_id -> { count, names: [...], mine: bool } from the Interested tab. */
+function interestMap_(myUserId) {
+  var map = {};
+  rows_(TABS.interested).forEach(function (r) {
+    var m = map[r.trip_id] || (map[r.trip_id] = { count: 0, names: [], mine: false });
+    m.count++;
+    m.names.push(String(r.user_name || ''));
+    if (myUserId && r.user_id === myUserId) m.mine = true;
+  });
+  return map;
+}
+
+function publicTrip_(t, myUserId, imap) {
   var depart = new Date(t.depart_at);
+  var im = imap && imap[t.trip_id] ? imap[t.trip_id] : { count: 0, names: [], mine: false };
+  var approx = t.approx === true || String(t.approx).toLowerCase() === 'true' || String(t.approx).toLowerCase() === 'yes';
   return {
     tripId: t.trip_id,
     driverName: t.driver_name,
     mine: myUserId ? t.driver_user_id === myUserId : false,
     origin: t.origin,
     destination: t.destination,
-    departAt: new Date(t.depart_at).toISOString(),
+    tripType: t.trip_type === 'roundtrip' ? 'roundtrip' : 'oneway',
+    approx: approx,
+    departAt: depart.toISOString(),
     departLocal: Utilities.formatDate(depart, TZ, "yyyy-MM-dd'T'HH:mm"),
     departDisplay: fmtDisplay_(depart),
     pickup: t.pickup,
     seatsTotal: Number(t.seats_total),
-    seatsTaken: Number(t.seats_taken),
-    seatsLeft: Number(t.seats_total) - Number(t.seats_taken),
+    interestedCount: im.count,
+    seatsLeft: Number(t.seats_total) - im.count,
+    interestedNames: im.names,
+    myInterested: im.mine,
     note: t.note,
-    status: t.status,
-    myRequest: myReqByTrip && myReqByTrip[t.trip_id] ? myReqByTrip[t.trip_id] : null
+    status: t.status
+  };
+}
+
+function findTrip_(tripId) {
+  var found = null;
+  rows_(TABS.trips).forEach(function (x) { if (x.trip_id === tripId) found = x; });
+  return found;
+}
+
+function parseTripInput_(trip, existingInterested) {
+  trip = trip || {};
+  var origin = String(trip.origin || '').trim();
+  var destination = String(trip.destination || '').trim();
+  if (!origin || !destination || origin.length > 120 || destination.length > 120) {
+    return { error: err_('BAD_TRIP', 'Enter an origin and destination (up to 120 characters).') };
+  }
+  var depart;
+  if (trip.departLocal) {
+    // "yyyy-MM-ddTHH:mm" wall time, always interpreted in America/New_York.
+    depart = Utilities.parseDate(String(trip.departLocal), TZ, "yyyy-MM-dd'T'HH:mm");
+  } else {
+    depart = new Date(Number(trip.departEpochMs));
+  }
+  if (isNaN(depart.getTime())) return { error: err_('BAD_TRIP', 'Departure time is missing or invalid.') };
+  if (depart <= new Date()) return { error: err_('PAST_DEPARTURE', 'Departure must be in the future.') };
+  var seats = Number(trip.seatsTotal);
+  if (!(Number.isInteger(seats) && seats >= 1 && seats <= 8)) {
+    return { error: err_('BAD_TRIP', 'Seats must be between 1 and 8.') };
+  }
+  if (existingInterested != null && seats < existingInterested) {
+    return { error: err_('BAD_TRIP', 'Seats cannot be fewer than the ' + existingInterested + ' people already interested.') };
+  }
+  return {
+    values: {
+      origin: origin,
+      destination: destination,
+      depart_at: depart.toISOString(),
+      pickup: String(trip.pickup || '').trim().slice(0, 300),
+      note: String(trip.note || '').trim().slice(0, 600),
+      seats_total: seats,
+      trip_type: trip.tripType === 'roundtrip' ? 'roundtrip' : 'oneway',
+      approx: trip.approx ? 'TRUE' : 'FALSE'
+    }
   };
 }
 
@@ -169,6 +267,13 @@ function register_(name, pin) {
   });
 }
 
+function apiRegister(name, pin) {
+  return wrap_(function() {
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
+    try { return register_(name, pin); } finally { lock.releaseLock(); }
+  });
+}
+
 function apiLogin(name, pin) {
   return wrap_(function () {
     name = String(name || '').trim();
@@ -187,24 +292,34 @@ function apiLogin(name, pin) {
   });
 }
 
-/* ---------------- trips ---------------- */
+function apiChangePin(token, currentPin, newPin) {
+  return wrap_(function () {
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
+    try {
+      var me = authUser_(token);
+      if (!me) return err_('AUTH', 'Log in first.');
+      if (me.pin_hash !== hash_(me.salt + ':' + String(currentPin || ''))) return err_('BAD_PIN', 'Current PIN is incorrect.');
+      newPin = String(newPin || '');
+      if (newPin.length < 4 || newPin.length > 32) return err_('BAD_PIN', 'Use 4 to 32 characters.');
+      var salt = Utilities.getUuid(), next = newToken_();
+      setCells_(TABS.users, me._row, { salt: salt, pin_hash: hash_(salt + ':' + newPin), token_hash: hash_(next) });
+      return ok_({ token: next });
+    } finally { lock.releaseLock(); }
+  });
+}
+
+/* ---------------- board ---------------- */
 
 function apiListTrips(token) {
   return wrap_(function () {
+    ensureSchema_();
     var me = token ? authUser_(token) : null;
-    var myReq = {};
-    if (me) {
-      rows_(TABS.requests).forEach(function (r) {
-        if (r.rider_user_id === me.user_id && (r.status === 'pending' || r.status === 'approved')) {
-          myReq[r.trip_id] = { requestId: r.request_id, status: r.status };
-        }
-      });
-    }
+    var imap = interestMap_(me ? me.user_id : null);
     var now = new Date();
     var trips = rows_(TABS.trips)
       .filter(function (t) { return t.status === 'open' && new Date(t.depart_at) > now; })
       .sort(function (a, b) { return new Date(a.depart_at) - new Date(b.depart_at); })
-      .map(function (t) { return publicTrip_(t, me ? me.user_id : null, myReq); });
+      .map(function (t) { return publicTrip_(t, me ? me.user_id : null, imap); });
     logUsage_(me ? me.display_name : '', me ? 'self-entered' : 'anonymous', 'list_trips', trips.length + ' upcoming');
     return ok_({ trips: trips, me: me ? { id: me.user_id, name: me.display_name } : null });
   });
@@ -212,177 +327,157 @@ function apiListTrips(token) {
 
 function apiCreateTrip(token, trip) {
   return wrap_(function () {
+    ensureSchema_();
     var me = authUser_(token);
     if (!me) return err_('AUTH', 'Log in first.');
-    trip = trip || {};
-    var origin = String(trip.origin || '').trim();
-    var destination = String(trip.destination || '').trim();
-    var pickup = String(trip.pickup || '').trim();
-    var note = String(trip.note || '').trim();
-    var seats = Number(trip.seatsTotal);
-    var depart;
-    if (trip.departLocal) {
-      // "yyyy-MM-ddTHH:mm" wall time, always interpreted in America/New_York.
-      depart = Utilities.parseDate(String(trip.departLocal), TZ, "yyyy-MM-dd'T'HH:mm");
-    } else {
-      depart = new Date(Number(trip.departEpochMs));
-    }
-    if (!origin || !destination) return err_('BAD_TRIP', 'Origin and destination are required.');
-    if (isNaN(depart.getTime())) return err_('BAD_TRIP', 'Departure time is missing or invalid.');
-    if (depart <= new Date()) return err_('PAST_DEPARTURE', 'Departure must be in the future.');
-    if (!(Number.isInteger(seats) && seats >= 1 && seats <= 8)) return err_('BAD_TRIP', 'Seats must be between 1 and 8.');
+    var parsed = parseTripInput_(trip, null);
+    if (parsed.error) return parsed.error;
     var tripId = newId_('trp');
+    var v = parsed.values;
     append_(TABS.trips, {
       trip_id: tripId, driver_user_id: me.user_id, driver_name: me.display_name,
-      origin: origin, destination: destination, depart_at: depart.toISOString(),
-      pickup: pickup, seats_total: seats, seats_taken: 0, note: note,
-      status: 'open', created_at: nowIso_(), updated_at: nowIso_()
+      origin: v.origin, destination: v.destination, depart_at: v.depart_at,
+      pickup: v.pickup, seats_total: v.seats_total, seats_taken: 0, note: v.note,
+      status: 'open', created_at: nowIso_(), updated_at: nowIso_(),
+      trip_type: v.trip_type, approx: v.approx
     });
-    logUsage_(me.display_name, 'self-entered', 'create_trip', origin + ' to ' + destination);
+    logUsage_(me.display_name, 'self-entered', 'create_trip', v.origin + ' to ' + v.destination);
     return ok_({ tripId: tripId });
+  });
+}
+
+function apiEditTrip(token, tripId, trip) {
+  return wrap_(function () {
+    ensureSchema_();
+    var me = authUser_(token);
+    if (!me) return err_('AUTH', 'Log in first.');
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
+    try {
+      var t = findTrip_(tripId);
+      if (!t) return err_('NOT_FOUND', 'Trip not found.');
+      if (t.driver_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the driver can edit this trip.');
+      if (t.status !== 'open' || new Date(t.depart_at) <= new Date()) return err_('NOT_OPEN', 'Only upcoming open trips can be edited.');
+      var im = interestMap_(null)[tripId];
+      var parsed = parseTripInput_(trip, im ? im.count : 0);
+      if (parsed.error) return parsed.error;
+      var v = parsed.values;
+      setCells_(TABS.trips, t._row, {
+        origin: v.origin, destination: v.destination, depart_at: v.depart_at,
+        pickup: v.pickup, note: v.note, seats_total: v.seats_total,
+        trip_type: v.trip_type, approx: v.approx, updated_at: nowIso_()
+      });
+      logUsage_(me.display_name, 'self-entered', 'edit_trip', tripId);
+      return ok_({ tripId: tripId });
+    } finally { lock.releaseLock(); }
+  });
+}
+
+/* Deletion is a status flip; the row stays recoverable in the private Sheet. */
+function apiDeleteTrip(token, tripId) {
+  return wrap_(function () {
+    ensureSchema_();
+    var me = authUser_(token);
+    if (!me) return err_('AUTH', 'Log in first.');
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
+    try {
+      var t = findTrip_(tripId);
+      if (!t) return err_('NOT_FOUND', 'Trip not found.');
+      if (t.driver_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the driver can delete this trip.');
+      setCells_(TABS.trips, t._row, { status: 'deleted', seats_taken: 0, updated_at: nowIso_() });
+      clearInterests_(tripId);
+      logUsage_(me.display_name, 'self-entered', 'delete_trip', tripId);
+      return ok_({ tripId: tripId });
+    } finally { lock.releaseLock(); }
   });
 }
 
 function apiCancelTrip(token, tripId) {
   return wrap_(function () {
+    ensureSchema_();
     var me = authUser_(token);
     if (!me) return err_('AUTH', 'Log in first.');
-    var lock = LockService.getScriptLock();
-    lock.waitLock(15000);
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
     try {
-      var trips = rows_(TABS.trips);
-      var t = null;
-      trips.forEach(function (x) { if (x.trip_id === tripId) t = x; });
+      var t = findTrip_(tripId);
       if (!t) return err_('NOT_FOUND', 'Trip not found.');
       if (t.driver_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the driver can cancel this trip.');
       if (t.status !== 'open') return err_('NOT_OPEN', 'Trip is not open.');
       setCells_(TABS.trips, t._row, { status: 'cancelled', updated_at: nowIso_() });
-      rows_(TABS.requests).forEach(function (r) {
-        if (r.trip_id === tripId && (r.status === 'pending' || r.status === 'approved')) {
-          setCells_(TABS.requests, r._row, { status: 'cancelled', decided_at: nowIso_() });
-        }
-      });
+      clearInterests_(tripId);
       logUsage_(me.display_name, 'self-entered', 'cancel_trip', tripId);
       return ok_({ tripId: tripId });
     } finally { lock.releaseLock(); }
   });
 }
 
-/* ---------------- requests ---------------- */
+/* ---------------- interested ---------------- */
 
-function apiRequestSeat(token, tripId) {
+function clearInterests_(tripId) {
+  var sh = sheet_(TABS.interested);
+  var mine = rows_(TABS.interested).filter(function (r) { return r.trip_id === tripId; });
+  mine.sort(function (a, b) { return b._row - a._row; })
+    .forEach(function (r) { sh.deleteRow(r._row); });
+}
+
+/** The one interaction on the board. On if absent, off if present. */
+function apiToggleInterest(token, tripId) {
   return wrap_(function () {
+    ensureSchema_();
     var me = authUser_(token);
     if (!me) return err_('AUTH', 'Log in first.');
-    var lock = LockService.getScriptLock();
-    lock.waitLock(15000);
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
     try {
-      var t = null;
-      rows_(TABS.trips).forEach(function (x) { if (x.trip_id === tripId) t = x; });
+      var t = findTrip_(tripId);
       if (!t) return err_('NOT_FOUND', 'Trip not found.');
       if (t.status !== 'open') return err_('NOT_OPEN', 'Trip is not open.');
       if (new Date(t.depart_at) <= new Date()) return err_('PAST_DEPARTURE', 'This trip has already departed.');
-      if (t.driver_user_id === me.user_id) return err_('OWN_TRIP', 'You cannot request a seat on your own trip.');
-      var dup = rows_(TABS.requests).some(function (r) {
-        return r.trip_id === tripId && r.rider_user_id === me.user_id &&
-          (r.status === 'pending' || r.status === 'approved');
+      if (t.driver_user_id === me.user_id) return err_('OWN_TRIP', 'This is your own trip.');
+      var existing = null;
+      rows_(TABS.interested).forEach(function (r) {
+        if (r.trip_id === tripId && r.user_id === me.user_id) existing = r;
       });
-      if (dup) return err_('DUPLICATE', 'You already have an active request on this trip.');
-      var requestId = newId_('req');
-      append_(TABS.requests, {
-        request_id: requestId, trip_id: tripId, rider_user_id: me.user_id,
-        rider_name: me.display_name, status: 'pending', created_at: nowIso_(), decided_at: ''
-      });
-      logUsage_(me.display_name, 'self-entered', 'request_seat', tripId);
-      return ok_({ requestId: requestId, status: 'pending' });
-    } finally { lock.releaseLock(); }
-  });
-}
-
-function apiCancelRequest(token, requestId) {
-  return wrap_(function () {
-    var me = authUser_(token);
-    if (!me) return err_('AUTH', 'Log in first.');
-    var lock = LockService.getScriptLock();
-    lock.waitLock(15000);
-    try {
-      var r = null;
-      rows_(TABS.requests).forEach(function (x) { if (x.request_id === requestId) r = x; });
-      if (!r) return err_('NOT_FOUND', 'Request not found.');
-      if (r.rider_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the rider can cancel this request.');
-      if (r.status !== 'pending' && r.status !== 'approved') return err_('NOT_ACTIVE', 'Request is not active.');
-      var wasApproved = r.status === 'approved';
-      setCells_(TABS.requests, r._row, { status: 'cancelled', decided_at: nowIso_() });
-      if (wasApproved) {
-        var t = null;
-        rows_(TABS.trips).forEach(function (x) { if (x.trip_id === r.trip_id) t = x; });
-        if (t) setCells_(TABS.trips, t._row, { seats_taken: Math.max(0, Number(t.seats_taken) - 1), updated_at: nowIso_() });
-      }
-      logUsage_(me.display_name, 'self-entered', 'cancel_request', requestId);
-      return ok_({ requestId: requestId });
-    } finally { lock.releaseLock(); }
-  });
-}
-
-function apiDecideRequest(token, requestId, decision) {
-  return wrap_(function () {
-    var me = authUser_(token);
-    if (!me) return err_('AUTH', 'Log in first.');
-    if (decision !== 'approve' && decision !== 'decline') return err_('BAD_DECISION', 'Decision must be approve or decline.');
-    var lock = LockService.getScriptLock();
-    lock.waitLock(15000);
-    try {
-      var r = null;
-      rows_(TABS.requests).forEach(function (x) { if (x.request_id === requestId) r = x; });
-      if (!r) return err_('NOT_FOUND', 'Request not found.');
-      var t = null;
-      rows_(TABS.trips).forEach(function (x) { if (x.trip_id === r.trip_id) t = x; });
-      if (!t) return err_('NOT_FOUND', 'Trip not found.');
-      if (t.driver_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the driver can decide on this request.');
-      if (t.status !== 'open' || new Date(t.depart_at) <= new Date()) return err_('NOT_OPEN', 'This trip is no longer available.');
-      if (r.status !== 'pending') return err_('NOT_PENDING', 'Request is no longer pending.');
-      if (decision === 'approve') {
-        if (Number(t.seats_taken) >= Number(t.seats_total)) return err_('TRIP_FULL', 'No seats left on this trip.');
-        setCells_(TABS.trips, t._row, { seats_taken: Number(t.seats_taken) + 1, updated_at: nowIso_() });
-        setCells_(TABS.requests, r._row, { status: 'approved', decided_at: nowIso_() });
+      var on;
+      if (existing) {
+        sheet_(TABS.interested).deleteRow(existing._row);
+        on = false;
       } else {
-        setCells_(TABS.requests, r._row, { status: 'declined', decided_at: nowIso_() });
+        append_(TABS.interested, {
+          interest_id: newId_('int'), trip_id: tripId, user_id: me.user_id,
+          user_name: me.display_name, created_at: nowIso_()
+        });
+        on = true;
       }
-      logUsage_(me.display_name, 'self-entered', decision + '_request', requestId);
-      return ok_({ requestId: requestId, status: decision === 'approve' ? 'approved' : 'declined' });
+      var im = interestMap_(me.user_id)[tripId] || { count: 0, names: [], mine: on };
+      logUsage_(me.display_name, 'self-entered', on ? 'interest_on' : 'interest_off', tripId);
+      return ok_({
+        tripId: tripId, interested: on,
+        interestedCount: im.count, seatsLeft: Number(t.seats_total) - im.count,
+        interestedNames: im.names
+      });
     } finally { lock.releaseLock(); }
   });
 }
 
 function apiMyStuff(token) {
   return wrap_(function () {
+    ensureSchema_();
     var me = authUser_(token);
     if (!me) return err_('AUTH', 'Log in first.');
-    var reqs = rows_(TABS.requests);
-    var tripsById = {};
-    rows_(TABS.trips).forEach(function (t) { tripsById[t.trip_id] = t; });
-    var myTrips = rows_(TABS.trips)
+    var imap = interestMap_(me.user_id);
+    var all = rows_(TABS.trips);
+    var myTrips = all
       .filter(function (t) { return t.driver_user_id === me.user_id && t.status !== 'deleted'; })
       .sort(function (a, b) { return new Date(a.depart_at) - new Date(b.depart_at); })
-      .map(function (t) {
-        var p = publicTrip_(t, me.user_id, null);
-        p.requests = reqs.filter(function (r) { return r.trip_id === t.trip_id; })
-          .map(function (r) {
-            return { requestId: r.request_id, riderName: r.rider_name, status: r.status, createdAt: r.created_at };
-          });
-        return p;
-      });
-    var myRequests = reqs
-      .filter(function (r) { return r.rider_user_id === me.user_id && r.status !== 'deleted'; })
-      .sort(function (a, b) { return new Date(b.created_at) - new Date(a.created_at); })
-      .map(function (r) {
-        var t = tripsById[r.trip_id];
-        return {
-          requestId: r.request_id, status: r.status, createdAt: r.created_at,
-          trip: t ? publicTrip_(t, me.user_id, null) : null
-        };
-      });
-    return ok_({ myTrips: myTrips, myRequests: myRequests });
+      .map(function (t) { return publicTrip_(t, me.user_id, imap); });
+    var now = new Date();
+    var myInterested = all
+      .filter(function (t) {
+        return t.status === 'open' && new Date(t.depart_at) > now &&
+          imap[t.trip_id] && imap[t.trip_id].mine && t.driver_user_id !== me.user_id;
+      })
+      .sort(function (a, b) { return new Date(a.depart_at) - new Date(b.depart_at); })
+      .map(function (t) { return publicTrip_(t, me.user_id, imap); });
+    return ok_({ myTrips: myTrips, myInterested: myInterested });
   });
 }
 
@@ -407,10 +502,11 @@ function isAdmin_(adminToken) {
 
 function apiAdminStats(adminToken) {
   return wrap_(function () {
+    ensureSchema_();
     if (!isAdmin_(adminToken)) return err_('AUTH', 'Admin login required.');
     var users = rows_(TABS.users);
     var trips = rows_(TABS.trips);
-    var reqs = rows_(TABS.requests);
+    var interests = rows_(TABS.interested);
     var usage = rows_(TABS.usage);
     function countBy(list, key) {
       var m = {};
@@ -426,8 +522,7 @@ function apiAdminStats(adminToken) {
       tripsTotal: trips.length,
       tripsByStatus: countBy(trips, 'status'),
       upcomingTrips: trips.filter(function (t) { return t.status === 'open' && new Date(t.depart_at) > now; }).length,
-      requestsTotal: reqs.length,
-      requestsByStatus: countBy(reqs, 'status'),
+      interestsTotal: interests.length,
       usageByAction: countBy(usage, 'action'),
       usageByIdentity: countBy(usage, 'identity_type'),
       recentUsage: usage.slice(-20).reverse().map(function (e) {
@@ -452,17 +547,17 @@ function checkSetup() {
 
 /**
  * Fallback setup: creates the "Standby Data" spreadsheet (owned by this
- * script's account) with the four tabs and header rows, and stores its ID
+ * script's account) with the tabs and header rows, and stores its ID
  * in the SPREADSHEET_ID script property. Run once from the editor only if
  * checkSetup shows the configured spreadsheet is not reachable.
  */
 function setupSheet() {
   var ss = SpreadsheetApp.create('Standby Data');
   var headers = {
-    Trips: ['trip_id', 'driver_user_id', 'driver_name', 'origin', 'destination', 'depart_at', 'pickup', 'seats_total', 'seats_taken', 'note', 'status', 'created_at', 'updated_at'],
-    Requests: ['request_id', 'trip_id', 'rider_user_id', 'rider_name', 'status', 'created_at', 'decided_at'],
+    Trips: ['trip_id', 'driver_user_id', 'driver_name', 'origin', 'destination', 'depart_at', 'pickup', 'seats_total', 'seats_taken', 'note', 'status', 'created_at', 'updated_at', 'trip_type', 'approx'],
     Users: ['user_id', 'display_name', 'pin_hash', 'salt', 'token_hash', 'created_at', 'last_seen_at'],
-    Usage: ['event_id', 'ts', 'actor', 'identity_type', 'action', 'detail']
+    Usage: ['event_id', 'ts', 'actor', 'identity_type', 'action', 'detail'],
+    Interested: ['interest_id', 'trip_id', 'user_id', 'user_name', 'created_at']
   };
   var first = ss.getSheets()[0];
   first.setName('Trips');
@@ -472,67 +567,4 @@ function setupSheet() {
   });
   PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', ss.getId());
   Logger.log('Created spreadsheet: ' + ss.getUrl());
-}
-
-/* Editing retains request history; deletion is recoverable in the private Sheet. */
-function apiEditTrip(token, tripId, trip) {
-  return wrap_(function () {
-    var me = authUser_(token);
-    if (!me) return err_('AUTH', 'Log in first.');
-    var lock = LockService.getScriptLock(); lock.waitLock(15000);
-    try {
-      var t = rows_(TABS.trips).filter(function (x) { return x.trip_id === tripId; })[0];
-      if (!t) return err_('NOT_FOUND', 'Trip not found.');
-      if (t.driver_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the driver can edit this trip.');
-      if (t.status !== 'open' || new Date(t.depart_at) <= new Date()) return err_('NOT_OPEN', 'Only upcoming open trips can be edited.');
-      trip = trip || {};
-      var seats = Number(trip.seatsTotal);
-      var depart = Utilities.parseDate(String(trip.departLocal || ''), TZ, "yyyy-MM-dd'T'HH:mm");
-      var origin = String(trip.origin || '').trim(), destination = String(trip.destination || '').trim();
-      if (!origin || !destination || origin.length > 120 || destination.length > 120) return err_('BAD_TRIP', 'Enter an origin and destination (up to 120 characters).');
-      if (!Number.isInteger(seats) || seats < 1 || seats > 8 || seats < Number(t.seats_taken)) return err_('BAD_TRIP', 'Seats must be 1–8 and include all approved riders.');
-      if (isNaN(depart.getTime()) || depart <= new Date()) return err_('BAD_TRIP', 'Choose a future departure.');
-      setCells_(TABS.trips, t._row, { origin: origin, destination: destination, depart_at: depart.toISOString(), pickup: String(trip.pickup || '').trim().slice(0,300), note: String(trip.note || '').trim().slice(0,600), seats_total: seats, updated_at: nowIso_() });
-      logUsage_(me.display_name, 'self-entered', 'edit_trip', tripId);
-      return ok_({tripId: tripId});
-    } finally { lock.releaseLock(); }
-  });
-}
-function apiDeleteTrip(token, tripId) {
-  return wrap_(function () {
-    var me = authUser_(token);
-    if (!me) return err_('AUTH', 'Log in first.');
-    var lock = LockService.getScriptLock(); lock.waitLock(15000);
-    try {
-      var t = rows_(TABS.trips).filter(function (x) { return x.trip_id === tripId; })[0];
-      if (!t) return err_('NOT_FOUND', 'Trip not found.');
-      if (t.driver_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the driver can delete this trip.');
-      setCells_(TABS.trips,t._row,{status:'deleted',seats_taken:0,updated_at:nowIso_()});
-      rows_(TABS.requests).forEach(function(r){ if(r.trip_id===tripId && (r.status==='pending'||r.status==='approved')) setCells_(TABS.requests,r._row,{status:'cancelled',decided_at:nowIso_()}); });
-      logUsage_(me.display_name,'self-entered','delete_trip',tripId);
-      return ok_({tripId:tripId});
-    } finally { lock.releaseLock(); }
-  });
-}
-function apiChangePin(token, currentPin, newPin) {
-  return wrap_(function () {
-    var lock = LockService.getScriptLock(); lock.waitLock(15000);
-    try {
-      var me=authUser_(token);
-      if(!me) return err_('AUTH','Log in first.');
-      if(me.pin_hash!==hash_(me.salt+':'+String(currentPin||''))) return err_('BAD_PIN','Current PIN is incorrect.');
-      newPin=String(newPin||'');
-      if(newPin.length<4||newPin.length>32) return err_('BAD_PIN','Use 4 to 32 characters.');
-      var salt=Utilities.getUuid(), next=newToken_();
-      setCells_(TABS.users,me._row,{salt:salt,pin_hash:hash_(salt+':'+newPin),token_hash:hash_(next)});
-      return ok_({token:next});
-    } finally { lock.releaseLock(); }
-  });
-}
-
-function apiRegister(name, pin) {
-  return wrap_(function() {
-    var lock=LockService.getScriptLock(); lock.waitLock(15000);
-    try { return register_(name,pin); } finally { lock.releaseLock(); }
-  });
 }

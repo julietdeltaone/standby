@@ -75,7 +75,7 @@ myInterested (bool), note, status }`.
   script cache). The password itself lives only in Script Properties
   (`ADMIN_PASSWORD`); it is not in this repository or the client code.
   Errors: `NOT_CONFIGURED`, `BAD_PASSWORD`.
-- `apiAdminStats(adminToken)` → `{ usersTotal, users: [{ name,
+- `apiAdminStats(adminToken)` → `{ usersTotal, users: [{ id, pin, name,
   identityType: "self-entered", createdAt, lastSeenAt }], tripsTotal,
   tripsByStatus, upcomingTrips, interestsTotal, usageByAction,
   usageByIdentity, recentUsage: [last 20 events] }`. Error: `AUTH`.
@@ -88,7 +88,7 @@ myInterested (bool), note, status }`.
   (Requests is legacy/unused). Trips carries `trip_type` and `approx`
   columns; the backend creates any missing v3 columns or the Interested
   tab automatically on first call (`ensureSchema_`).
-- Storage timestamps are ISO 8601 UTC; display times are America/New_York.
+- Sheet timestamps are native dates formatted in America/New_York with AM/PM. API wire timestamps remain ISO for parsing; all displayed times use Eastern.
 - Script Properties: `SPREADSHEET_ID`, `ADMIN_PASSWORD`. Set in the Apps
   Script editor under Project Settings. Never commit them anywhere.
 - Web app manifest: executes as the deploying account (USER_DEPLOYING),
@@ -112,3 +112,15 @@ myInterested (bool), note, status }`.
    filling and releasing seats, More Info contents, admin hidden on
    mobile and behind the gear on desktop, and the status bar sitting
    flush to the top of the screen while scrolling.
+
+## v4 account and display update
+
+- New accounts use U1, U2, etc. PINs are readable strings, including leading zeros.
+- Legacy PIN hashes cannot be reversed. A successful login or an admin reset stores the readable PIN and clears that user's old hash and salt. Empty admin PIN fields mean the old PIN has not yet been converted.
+- `apiAdminSetPin(adminToken, userId, pin)` sets a 4–32 character PIN and invalidates that user's existing session. Only authenticated admins can retrieve or edit PINs. Session tokens remain hashed.
+- `apiAdminClearBoard(adminToken)` hides open trips and clears interest marks. User accounts remain.
+- After copying both source files, run `migrateStandbyV4()` once before publishing the new deployment. It updates IDs and linked ownership, sets the sheet timezone, and converts timestamp cells. It is safe to rerun. Keep existing Script Properties and the same deployment URL.
+- Run `node tests/backend.cjs` for backend regression and script syntax checks.
+- `previews/index.html` compares Midnight Dispatch plus five alternate mobile skins. These use mock data only.
+
+The live board was reset to three clearly labeled walkthrough trips: Potsdam–Syracuse (one-way, exact, empty), Canton–Watertown (round trip, approximate, one interested), and Norwood–Plattsburgh (one-way, full, pickup unspecified). All three belong to JD Meyers for editing. Historical trips are soft-deleted.

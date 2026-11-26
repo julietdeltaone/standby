@@ -77,3 +77,42 @@ Functions never throw across `google.script.run`; catch failures with
 - Web app manifest: executes as the deploying account (USER_DEPLOYING),
   access ANYONE_ANONYMOUS so friends do not need a Google account.
   The Sheet itself stays private; all access goes through the script.
+
+## Interface update: November 25, 2026
+
+- `apiEditTrip(token, tripId, trip)` accepts the same fields as creation.
+  Only the owner can edit an upcoming open trip. Total capacity must be an
+  integer from 1–8 and cannot drop below approved riders. Existing requests
+  remain attached. The UI reminds the driver to tell riders about changes.
+- `apiDeleteTrip(token, tripId)` is owner-only, marks the trip `deleted`,
+  cancels pending/approved requests, and clears occupied capacity. Deleted
+  trips disappear from the driver's list; the private Sheet retains history.
+- `apiChangePin(token, currentPin, newPin)` verifies the current PIN, accepts
+  4–32 characters, changes the salt/hash, and returns `{token}` for the new
+  session. The prior token is invalidated.
+- `Trip` now includes `departLocal` for Eastern-time editing.
+- Admin dashboard uses the existing statistics endpoint. Page visits and
+  identity breakdowns are events, not unique visitor counts.
+- UI map loads Leaflet 1.9.4 and OpenStreetMap tiles only when requested.
+  Known town centers have a straight connecting line, not a road route.
+  Unrecognized locations show an explanatory fallback, never guessed points.
+- Support email: luna-jd@muse.ai.
+
+## Deploy this update (Luna)
+
+1. Copy the repository's latest `apps-script/Code.gs` and
+   `apps-script/Index.html` into the **existing** Standby Apps Script project.
+   Retain the existing spreadsheet and Script Properties. Do not run setupSheet.
+2. Save, then Deploy → Manage deployments → edit the current web app →
+   New version → Deploy. Preserve its existing execution identity and access.
+   The requested audience is anyone with the link, including visitors without
+   a Google account; verify the existing deployment actually permits this.
+3. Return the deployed `/exec` URL and deployment version/commit to ChatGPT.
+4. Verify mobile and desktop layouts, registration/login, PIN changes,
+   create/edit/delete own trips, rider request/cancel, driver approve/decline,
+   admin statistics, email link, and supported/unsupported map locations.
+   Verify another account cannot mutate the owner's trip. Use clearly marked
+   test records and remove them through the app when finished.
+
+Local validation: `node tests/backend.cjs` runs mocked Apps Script behavioral
+checks. It does not substitute for live deployment or browser validation.

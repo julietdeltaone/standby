@@ -1,213 +1,47 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Standby</title>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Standby</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: Georgia, 'Times New Roman', serif; background: #101418; color: #e8e4da;
-         display: flex; justify-content: center; }
-  main { width: 100%; max-width: 680px; padding: 28px 18px 60px; }
-  h1 { font-size: 30px; letter-spacing: 3px; margin: 0; font-weight: normal; }
-  h2 { font-size: 15px; letter-spacing: 2px; text-transform: uppercase; color: #b49a5e; margin: 26px 0 10px; font-weight: normal; }
-  .sub { color: #9aa3ab; font-size: 13px; margin-top: 4px; }
-  .disclosure { font-size: 12px; color: #8b939b; border: 1px solid #2a3138; border-radius: 8px; padding: 8px 10px; margin-top: 14px; }
-  .card { background: #171c21; border: 1px solid #2a3138; border-radius: 10px; padding: 14px; margin: 10px 0; }
-  label { display: block; font-size: 12px; color: #9aa3ab; margin: 8px 0 3px; }
-  input, textarea, select { width: 100%; padding: 9px; border-radius: 6px; border: 1px solid #333c44;
-    background: #0d1013; color: #e8e4da; font-size: 14px; }
-  button { background: #b49a5e; color: #14100a; border: 0; border-radius: 6px; padding: 9px 14px;
-    font-size: 14px; cursor: pointer; margin: 8px 6px 0 0; }
-  button.ghost { background: transparent; color: #b49a5e; border: 1px solid #b49a5e; }
-  button.danger { background: transparent; color: #d98a8a; border: 1px solid #7a4444; }
-  .row { display: flex; gap: 10px; } .row > div { flex: 1; }
-  .msg { font-size: 13px; margin-top: 8px; min-height: 16px; }
-  .err { color: #e09a9a; } .fine { color: #9fc79f; }
-  .trip-title { font-size: 16px; }
-  .meta { color: #9aa3ab; font-size: 13px; margin-top: 2px; }
-  .pill { display: inline-block; font-size: 11px; border: 1px solid #3a434c; border-radius: 999px; padding: 1px 8px; color: #c9cfd4; }
-  .hidden { display: none; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  td, th { border-bottom: 1px solid #2a3138; padding: 5px 4px; text-align: left; }
-</style>
-</head>
-<body>
-<main>
-  <h1>STANDBY</h1>
-  <div class="sub">North Country trip sharing. Post a trip you are already taking; friends request a seat.</div>
-  <div class="disclosure">Heads up: Standby logs visits and actions (posts, requests, approvals) to run the service and show simple usage counts. Until you register, you are counted as anonymous. If you register, your self-entered display name is attached to your actions. There is no verified identity in this version.</div>
-
-  <div id="authCard" class="card">
-    <h2 style="margin-top:0">Your name</h2>
-    <div class="row">
-      <div><label>Display name</label><input id="name" autocomplete="nickname"></div>
-      <div><label>PIN (4+ characters)</label><input id="pin" type="password"></div>
-    </div>
-    <button id="btnRegister">Register</button>
-    <button id="btnLogin" class="ghost">Log in</button>
-    <div id="authMsg" class="msg"></div>
-  </div>
-
-  <div id="meBar" class="card hidden">
-    Signed in as <b id="meName"></b>
-    <button id="btnLogout" class="ghost" style="float:right;margin-top:0">Log out</button>
-  </div>
-
-  <h2>Upcoming trips</h2>
-  <div id="trips"></div>
-  <button id="btnRefresh" class="ghost">Refresh trips</button>
-
-  <div id="postCard" class="hidden">
-    <h2>Post a trip</h2>
-    <div class="card">
-      <div class="row">
-        <div><label>From</label><input id="tOrigin" placeholder="Potsdam"></div>
-        <div><label>To</label><input id="tDest" placeholder="Syracuse"></div>
-      </div>
-      <div class="row">
-        <div><label>Departure (Eastern)</label><input id="tWhen" type="datetime-local"></div>
-        <div><label>Seats available</label><input id="tSeats" type="number" min="1" max="8" value="2"></div>
-      </div>
-      <label>Pickup spot</label><input id="tPickup" placeholder="Clarkson, Cheel lot">
-      <label>Note (optional)</label><input id="tNote" placeholder="Drill weekend, room for one bag">
-      <button id="btnPost">Post trip</button>
-      <div id="postMsg" class="msg"></div>
-    </div>
-  </div>
-
-  <div id="mineCard" class="hidden">
-    <h2>My trips and requests</h2>
-    <div id="mine"></div>
-  </div>
-
-  <h2>Admin</h2>
-  <div class="card">
-    <div class="row">
-      <div><label>Admin password</label><input id="aPass" type="password"></div>
-    </div>
-    <button id="btnAdmin" class="ghost">Admin login</button>
-    <div id="adminMsg" class="msg"></div>
-    <div id="adminOut"></div>
-  </div>
-</main>
-
-<script>
-  var token = localStorage.getItem('standby_token') || '';
-  var adminToken = '';
-  function $(id) { return document.getElementById(id); }
-  function run(fn, args, onOk, msgEl) {
-    var r = google.script.run
-      .withSuccessHandler(function (res) {
-        if (res && res.ok) { onOk(res.data); }
-        else if (msgEl) { msgEl.innerHTML = '<span class="err">' + (res ? res.error : 'Server error') + '</span>'; }
-      })
-      .withFailureHandler(function (e) { if (msgEl) msgEl.innerHTML = '<span class="err">' + e.message + '</span>'; });
-    r[fn].apply(r, args);
-  }
-  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-
-  function refreshTrips() {
-    run('apiListTrips', [token], function (d) {
-      if (d.me) {
-        $('authCard').classList.add('hidden');
-        $('meBar').classList.remove('hidden');
-        $('postCard').classList.remove('hidden');
-        $('mineCard').classList.remove('hidden');
-        $('meName').textContent = d.me.name;
-        refreshMine();
-      }
-      var el = $('trips');
-      if (!d.trips.length) { el.innerHTML = '<div class="card">No upcoming trips yet.</div>'; return; }
-      el.innerHTML = d.trips.map(function (t) {
-        var action = '';
-        if (!token) action = '<div class="meta">Register or log in to request a seat.</div>';
-        else if (t.mine) action = '<span class="pill">Your trip</span>';
-        else if (t.myRequest) action = '<span class="pill">Request ' + esc(t.myRequest.status) + '</span> ' +
-          '<button class="danger" onclick="cancelReq(\'' + t.myRequest.requestId + '\')">Cancel request</button>';
-        else if (t.seatsLeft > 0) action = '<button onclick="reqSeat(\'' + t.tripId + '\')">Request a seat</button>';
-        else action = '<span class="pill">Full</span>';
-        return '<div class="card"><div class="trip-title">' + esc(t.origin) + ' to ' + esc(t.destination) + '</div>' +
-          '<div class="meta">' + esc(t.departDisplay) + ' &middot; driver ' + esc(t.driverName) + '</div>' +
-          '<div class="meta">Pickup: ' + esc(t.pickup || 'ask driver') + ' &middot; seats left: ' + t.seatsLeft + ' of ' + t.seatsTotal + '</div>' +
-          (t.note ? '<div class="meta">' + esc(t.note) + '</div>' : '') + action + '</div>';
-      }).join('');
-    }, $('authMsg'));
-  }
-  function refreshMine() {
-    if (!token) return;
-    run('apiMyStuff', [token], function (d) {
-      var h = '';
-      d.myTrips.forEach(function (t) {
-        h += '<div class="card"><div class="trip-title">' + esc(t.origin) + ' to ' + esc(t.destination) + '</div>' +
-          '<div class="meta">' + esc(t.departDisplay) + ' &middot; ' + esc(t.status) + ' &middot; seats ' + t.seatsTaken + '/' + t.seatsTotal + '</div>';
-        t.requests.forEach(function (r) {
-          h += '<div class="meta">' + esc(r.riderName) + ': ' + esc(r.status);
-          if (r.status === 'pending' && t.status === 'open') {
-            h += ' <button onclick="decide(\'' + r.requestId + '\',\'approve\')">Approve</button>' +
-                 ' <button class="ghost" onclick="decide(\'' + r.requestId + '\',\'decline\')">Decline</button>';
-          }
-          h += '</div>';
-        });
-        if (t.status === 'open') h += '<button class="danger" onclick="cancelTrip(\'' + t.tripId + '\')">Cancel trip</button>';
-        h += '</div>';
-      });
-      d.myRequests.forEach(function (r) {
-        if (!r.trip) return;
-        h += '<div class="card"><div class="meta">Your request: ' + esc(r.status) + ' on ' +
-          esc(r.trip.origin) + ' to ' + esc(r.trip.destination) + ' (' + esc(r.trip.departDisplay) + ')</div></div>';
-      });
-      $('mine').innerHTML = h || '<div class="card">Nothing yet.</div>';
-    }, null);
-  }
-  function reqSeat(tripId) { run('apiRequestSeat', [token, tripId], refreshTrips, $('authMsg')); }
-  function cancelReq(id) { run('apiCancelRequest', [token, id], function () { refreshTrips(); }, $('authMsg')); }
-  function cancelTrip(id) { run('apiCancelTrip', [token, id], function () { refreshTrips(); }, $('authMsg')); }
-  function decide(id, d) { run('apiDecideRequest', [token, id, d], function () { refreshTrips(); }, $('authMsg')); }
-
-  $('btnRegister').onclick = function () {
-    run('apiRegister', [$('name').value, $('pin').value], function (d) {
-      token = d.token; localStorage.setItem('standby_token', token);
-      $('authMsg').innerHTML = '<span class="fine">Registered as ' + esc(d.user.name) + '</span>'; refreshTrips();
-    }, $('authMsg'));
-  };
-  $('btnLogin').onclick = function () {
-    run('apiLogin', [$('name').value, $('pin').value], function (d) {
-      token = d.token; localStorage.setItem('standby_token', token);
-      $('authMsg').innerHTML = '<span class="fine">Welcome back, ' + esc(d.user.name) + '</span>'; refreshTrips();
-    }, $('authMsg'));
-  };
-  $('btnLogout').onclick = function () { token = ''; localStorage.removeItem('standby_token'); location.reload(); };
-  $('btnRefresh').onclick = refreshTrips;
-  $('btnPost').onclick = function () {
-    var when = $('tWhen').value;
-    if (!when) { $('postMsg').innerHTML = '<span class="err">Pick a departure time.</span>'; return; }
-    // Send the raw wall-time string; the server interprets it as America/New_York.
-    run('apiCreateTrip', [token, {
-      origin: $('tOrigin').value, destination: $('tDest').value, pickup: $('tPickup').value,
-      note: $('tNote').value, seatsTotal: Number($('tSeats').value), departLocal: when
-    }], function () { $('postMsg').innerHTML = '<span class="fine">Trip posted.</span>'; refreshTrips(); }, $('postMsg'));
-  };
-  $('btnAdmin').onclick = function () {
-    run('apiAdminLogin', [$('aPass').value], function (d) {
-      adminToken = d.adminToken;
-      run('apiAdminStats', [adminToken], function (s) {
-        $('adminOut').innerHTML =
-          '<table><tr><th>Metric</th><th>Value</th></tr>' +
-          '<tr><td>Registered users</td><td>' + s.usersTotal + '</td></tr>' +
-          '<tr><td>Trips total</td><td>' + s.tripsTotal + ' (upcoming open: ' + s.upcomingTrips + ')</td></tr>' +
-          '<tr><td>Trips by status</td><td>' + esc(JSON.stringify(s.tripsByStatus)) + '</td></tr>' +
-          '<tr><td>Requests by status</td><td>' + esc(JSON.stringify(s.requestsByStatus)) + '</td></tr>' +
-          '<tr><td>Usage by action</td><td>' + esc(JSON.stringify(s.usageByAction)) + '</td></tr>' +
-          '<tr><td>Usage by identity</td><td>' + esc(JSON.stringify(s.usageByIdentity)) + '</td></tr></table>' +
-          '<h2>Users (self-entered names)</h2>' +
-          s.users.map(function (u) { return '<div class="meta">' + esc(u.name) + ' &middot; joined ' + esc(u.createdAt) + '</div>'; }).join('');
-        $('adminMsg').innerHTML = '<span class="fine">Admin in.</span>';
-      }, $('adminMsg'));
-    }, $('adminMsg'));
-  };
-
-  refreshTrips();
-</script>
-</body>
-</html>
+:root{color-scheme:dark;--bg:#061128;--panel:#0e2145;--line:#28446e;--muted:#adbfda;--blue:#426bff;--cyan:#65e0df}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#f4f8ff;font:16px/1.5 system-ui,-apple-system,sans-serif}main{max-width:1180px;margin:auto;padding:24px 24px 64px}header{text-align:center;padding:22px 0}h1{font-size:48px;letter-spacing:-2px;margin:0}h2{font-size:24px;margin:0 0 16px}h3{margin:0 0 10px;font-size:18px}p{margin:8px 0}a{color:var(--cyan)}.eyebrow{color:var(--cyan);letter-spacing:3px;font-size:13px;font-weight:700}.muted,small{color:var(--muted)}nav,.actions{display:flex;justify-content:center;align-items:center;gap:10px;flex-wrap:wrap}nav{margin:22px auto 30px}button{font:inherit;font-weight:600;background:var(--blue);border:1px solid transparent;color:white;padding:11px 18px;border-radius:10px;cursor:pointer;min-height:44px;transition:background .1s}button:hover{background:#567dff}button:disabled{opacity:.65;cursor:wait}button.secondary,nav button{background:#13294e;border-color:var(--line)}nav button.active{background:var(--blue);border-color:#7895ff}.danger{background:#402039;color:#ffbdcc;border-color:#87465d}.hidden{display:none!important}.panel,.trip{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:24px}.panel{margin:16px 0}.narrow{max-width:620px;margin:18px auto}.center{text-align:center}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.trip{text-align:center;display:flex;flex-direction:column;gap:12px}.trip h3{font-size:25px;letter-spacing:-.6px;margin:0}.route-label{font-size:13px;text-transform:uppercase;letter-spacing:2px;color:var(--cyan)}.trip .actions{margin-top:auto}.pill{display:inline-block;background:#173950;color:#87f1e8;border-radius:30px;padding:5px 12px;font-size:14px}.fields{display:grid;grid-template-columns:1fr 1fr;gap:16px}label{display:block;text-align:left;color:var(--muted);font-size:14px}input,textarea{display:block;width:100%;background:#07172f;color:white;border:1px solid #38547e;border-radius:9px;padding:12px;font:inherit;margin-top:5px;min-width:0}input:focus,textarea:focus{outline:2px solid var(--cyan);outline-offset:2px}.full{grid-column:1/-1}.status{position:sticky;top:8px;z-index:20;min-height:28px;text-align:center;color:var(--cyan);background:var(--bg);font-size:14px}.status.error{color:#ffb8c8}.status.busy:before{content:'';display:inline-block;width:10px;height:10px;border:2px solid #294d75;border-top-color:var(--cyan);border-radius:50%;margin-right:8px;animation:spin .6s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.metric{padding:22px;border-radius:14px;background:#122c58;text-align:center}.metric b{display:block;font-size:36px;color:var(--cyan)}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:13px 12px;text-align:left;border-bottom:1px solid var(--line)}th{color:var(--muted)}.bar-row{display:grid;grid-template-columns:140px 1fr 40px;gap:12px;align-items:center;margin:12px 0;font-size:14px}.bar{height:9px;background:#213a61;border-radius:8px;overflow:hidden}.bar i{display:block;height:100%;background:var(--cyan)}footer{text-align:center;margin-top:42px;color:var(--muted);font-size:14px}dialog{background:var(--panel);color:white;border:1px solid var(--line);border-radius:18px;width:min(680px,94vw);padding:24px}dialog::backdrop{background:#020817cc}.map{height:310px;border-radius:12px;margin:16px 0;background:#142e50}.empty{text-align:center;padding:46px 20px;border:1px dashed var(--line);border-radius:18px;color:var(--muted)}.request{border-top:1px solid var(--line);padding-top:14px;margin-top:8px}.skeleton{height:240px;border-radius:18px;background:#102548}.section-head{text-align:center;margin-bottom:20px}.section-head .actions{margin-top:12px}@media(max-width:700px){main{padding:16px 14px 40px}h1{font-size:40px}.grid{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr}.fields{grid-template-columns:1fr}.full{grid-column:auto}.panel,.trip{padding:19px}nav{gap:7px}nav button{padding:10px 13px}.bar-row{grid-template-columns:110px 1fr 30px}}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head><body><main>
+<header><div class="eyebrow">NORTH COUNTRY · OPEN SEATS</div><h1>Standby</h1><p class="muted">Already going? Bring someone along.</p></header>
+<nav aria-label="Main navigation"><button data-view="board" class="active">Find a ride</button><button data-view="post">Post a trip</button><button data-view="mine">My trips</button><button data-view="account">Account</button><button data-view="admin">Admin</button></nav>
+<div id="status" class="status" role="status" aria-live="polite"></div>
+<section id="board" class="view"><div class="section-head"><h2>Upcoming departures</h2><p class="muted">Pick a trip. Request a seat. The driver confirms.</p><button class="secondary" id="refresh">Refresh trips</button></div><div id="trips" class="grid"><div class="skeleton" aria-label="Loading trips"></div><div class="skeleton"></div></div></section>
+<section id="post" class="view hidden"><div class="panel narrow"><h2 class="center" id="postTitle">Post a trip</h2><form id="tripForm"><div class="fields"><label>From<input id="origin" list="towns" required maxlength="120" placeholder="Potsdam"></label><label>To<input id="destination" list="towns" required maxlength="120" placeholder="Syracuse"></label><label>Departure · Eastern time<input id="departLocal" type="datetime-local" required></label><label>Total passenger seats<input id="seatsTotal" type="number" min="1" max="8" step="1" value="2" required></label><label class="full">Pickup spot<input id="pickup" maxlength="300" placeholder="Where should riders meet you?"></label><label class="full">Note · optional<textarea id="note" maxlength="600" rows="2"></textarea></label></div><p class="muted" id="editHint"></p><div class="actions"><button id="saveTrip">Post trip</button><button type="button" class="secondary" id="discard">Cancel</button></div></form></div></section>
+<section id="mine" class="view hidden"><h2 class="center">My trips & requests</h2><div id="myTrips" class="grid"></div></section>
+<section id="account" class="view hidden"><div class="panel narrow center" id="auth"><h2>Come along.</h2><p class="muted">Choose a name and PIN, or log in to your account.</p><form id="authForm"><label>Display name<input id="name" autocomplete="username" minlength="2" maxlength="40" required></label><label>PIN<input id="pin" type="password" minlength="4" maxlength="32" autocomplete="current-password" required></label><div class="actions"><button name="login" value="login">Log in</button><button name="register" value="register" class="secondary">Register</button></div></form></div><div id="signedIn" class="panel narrow center hidden"><h2 id="userName"></h2><button id="logout" class="secondary">Log out</button><h3 style="margin-top:26px">Change PIN</h3><form id="pinForm"><label>Current PIN<input id="currentPin" type="password" autocomplete="current-password" required></label><label>New PIN<input id="newPin" type="password" minlength="4" maxlength="32" autocomplete="new-password" required></label><div class="actions"><button>Change PIN</button></div></form></div><p class="center muted">Need help with your account? <a href="mailto:luna-jd@muse.ai">Email the administrator</a>.</p></section>
+<section id="admin" class="view hidden"><div id="adminLogin" class="panel narrow center"><h2>Administrator</h2><form id="adminForm"><label>Password<input id="adminPassword" type="password" autocomplete="current-password" required></label><button>Open dashboard</button></form></div><div id="dashboard" class="hidden"><div class="section-head"><h2>Community overview</h2><p class="muted" id="adminUpdated"></p><div class="actions"><button id="adminRefresh" class="secondary">Refresh statistics</button><button id="adminLogout" class="secondary">Close admin session</button></div></div><div id="adminData"></div></div></section>
+<footer><a href="mailto:luna-jd@muse.ai">Email administrator</a> · All departure times are Eastern</footer>
+<datalist id="towns"><option>Potsdam</option><option>Canton</option><option>Watertown</option><option>Syracuse</option><option>Massena</option><option>Ogdensburg</option><option>Norwood</option><option>Norfolk</option><option>Madrid</option><option>Malone</option><option>Plattsburgh</option><option>Albany</option><option>Rochester</option><option>Utica</option></datalist>
+<dialog id="routeDialog"><h2 id="routeTitle">Route overview</h2><div id="map" class="map"></div><p id="mapNote" class="muted">Town centers connected by a straight line. Approximate overview, not driving directions.</p><div class="actions"><button id="closeMap" class="secondary">Close map</button></div></dialog>
+</main><script>
+const $=id=>document.getElementById(id), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let token='';try{token=localStorage.getItem('standby_token')||''}catch(e){}let me=null,adminToken='',trips=[],myTrips=[],editing='',revision=0,pending=0,mutation=false,map=null,mapPromise=null;
+function status(text,error=false){$('status').textContent=text;$('status').classList.toggle('error',error)}
+function saveToken(t){token=t;try{if(t)localStorage.setItem('standby_token',t);else localStorage.removeItem('standby_token')}catch(e){}}
+function rpc(fn,...args){pending++;$('status').classList.add('busy');return new Promise((resolve,reject)=>{if(!window.google?.script?.run){reject(Error('Open Standby using its deployed Apps Script link.'));return}google.script.run.withSuccessHandler(r=>r?.ok?resolve(r.data):reject(Error(r?.error||'Could not complete that action.'))).withFailureHandler(e=>reject(Error(e.message||'Connection interrupted. Try again.')))[fn](...args)}).finally(()=>{if(!--pending)$('status').classList.remove('busy')})}
+async function action(button,label,fn){if(mutation)return;mutation=true;const old=button?.textContent;if(button){button.disabled=true;button.textContent=label}status(label);try{await fn()}catch(e){status(e.message,true)}finally{mutation=false;if(button){button.disabled=false;button.textContent=old}}}
+function view(id){if(['post','mine'].includes(id)&&!me){status('Log in or register to continue.');id='account'}document.querySelectorAll('.view').forEach(e=>e.classList.toggle('hidden',e.id!==id));document.querySelectorAll('nav button').forEach(e=>e.classList.toggle('active',e.dataset.view===id));if(id==='mine'&&me)refreshMine().catch(e=>status(e.message,true))}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>view(b.dataset.view));
+function identity(){ $('auth').classList.toggle('hidden',!!me);$('signedIn').classList.toggle('hidden',!me);$('userName').textContent=me?'Hello, '+me.name:'' }
+function button(label,act,id,cls='secondary'){return '<button class="'+cls+'" data-action="'+act+'" data-id="'+esc(id)+'">'+label+'</button>'}
+function card(t,own=false){let acts=button('Route overview','map',t.tripId);if(own){if(t.status==='open'&&new Date(t.departAt)>new Date())acts+=button('Edit trip','edit',t.tripId);acts+=button('Delete trip','delete',t.tripId,'danger')}else if(t.mine){acts+='<span class="pill">Your trip</span>'}else if(t.myRequest){acts+='<span class="pill">'+esc(t.myRequest.status)+'</span>'+button('Cancel request','cancelRequest',t.myRequest.requestId,'danger')}else if(t.seatsLeft>0){acts+=button('Request a seat','request',t.tripId,'primary')}else acts+='<span class="pill">Full</span>';return '<article class="trip"><div class="route-label">'+esc(t.origin)+'</div><h3>'+esc(t.destination)+'</h3><div>'+esc(t.departDisplay)+'</div><div><span class="pill">'+t.seatsLeft+' of '+t.seatsTotal+' seats available</span></div><div class="muted">'+esc(t.driverName)+' · '+esc(t.pickup||'Pickup to be arranged')+'</div>'+(t.note?'<p>'+esc(t.note)+'</p>':'')+(own?'<div class="muted">'+esc(t.status)+'</div>':'')+'<div class="actions">'+acts+'</div>'+(own?(t.requests||[]).map(r=>'<div class="request">'+esc(r.riderName)+' · '+esc(r.status)+(r.status==='pending'&&t.status==='open'?'<div class="actions">'+button('Approve','approve',r.requestId,'primary')+button('Decline','decline',r.requestId)+'</div>':'')+'</div>').join(''):'')+'</article>'}
+async function refresh(){const rev=++revision;status('Updating trips…');try{const d=await rpc('apiListTrips',token);if(rev!==revision)return;me=d.me;if(token&&!me)saveToken('');trips=d.trips;identity();$('trips').innerHTML=trips.map(t=>card(t)).join('')||'<div class="empty full"><h3>No departures yet</h3>Post your next trip to get things started.</div>';status('Trips updated.');if(me)await refreshMine()}catch(e){if(rev===revision){status(e.message,true);if(!trips.length)$('trips').innerHTML='<div class="empty full">Trips could not load. Use Refresh trips to try again.</div>'}}}
+async function refreshMine(){const owner=token;const d=await rpc('apiMyStuff',owner);if(owner!==token)return;myTrips=d.myTrips;$('myTrips').innerHTML=myTrips.map(t=>card(t,true)).join('')+d.myRequests.filter(r=>r.trip).map(r=>'<article class="trip"><h3>'+esc(r.trip.origin)+' to '+esc(r.trip.destination)+'</h3><p>'+esc(r.trip.departDisplay)+'</p><span class="pill">'+esc(r.status)+'</span>'+(['pending','approved'].includes(r.status)?button('Cancel request','cancelRequest',r.requestId,'danger'):'')+'</article>').join('')||'<div class="empty full">Your trips and seat requests will appear here.</div>'}
+$('refresh').onclick=e=>action(e.currentTarget,'Refreshing…',refresh);
+function resetForm(){editing='';$('tripForm').reset();$('postTitle').textContent='Post a trip';$('saveTrip').textContent='Post trip';$('editHint').textContent=''}
+$('discard').onclick=()=>{resetForm();view('board')};
+$('tripForm').onsubmit=e=>{e.preventDefault();const data={};['origin','destination','departLocal','seatsTotal','pickup','note'].forEach(k=>data[k]=$(k).value);data.seatsTotal=Number(data.seatsTotal);action($('saveTrip'),'Saving…',async()=>{if(editing)await rpc('apiEditTrip',token,editing,data);else await rpc('apiCreateTrip',token,data);resetForm();view('board');await refresh();status('Trip saved.')})};
+$('authForm').onsubmit=e=>{e.preventDefault();const register=e.submitter?.value==='register';action(e.submitter,register?'Registering…':'Logging in…',async()=>{const d=await rpc(register?'apiRegister':'apiLogin',$('name').value,$('pin').value);saveToken(d.token);me=d.user;$('pin').value='';identity();view('board');await refresh()})};
+$('logout').onclick=()=>{revision++;saveToken('');me=null;myTrips=[];$('myTrips').innerHTML='';resetForm();identity();view('board');refresh()};
+$('pinForm').onsubmit=e=>{e.preventDefault();action(e.submitter,'Updating PIN…',async()=>{const d=await rpc('apiChangePin',token,$('currentPin').value,$('newPin').value);saveToken(d.token);$('pinForm').reset();status('PIN changed.')})};
+document.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const id=b.dataset.id,a=b.dataset.action,t=myTrips.find(x=>x.tripId===id)||trips.find(x=>x.tripId===id);if(a==='map'){showMap(t);return}if(a==='edit'){editing=id;['origin','destination','departLocal','seatsTotal','pickup','note'].forEach(k=>$(k).value=t[k]||'');$('postTitle').textContent='Edit trip';$('saveTrip').textContent='Save changes';$('editHint').textContent='Approved riders remain booked. Let them know if your plans change.';view('post');return}if(!me){view('account');status('Log in or register to request a seat.');return}if(a==='delete'&&!confirm('Delete this trip? Active seat requests will be cancelled.'))return;const calls={delete:['apiDeleteTrip',id],request:['apiRequestSeat',id],cancelRequest:['apiCancelRequest',id],approve:['apiDecideRequest',id,'approve'],decline:['apiDecideRequest',id,'decline']};if(calls[a])action(b,'Saving…',async()=>{await rpc(calls[a][0],token,...calls[a].slice(1));await refresh();status(a==='delete'?'Trip deleted.':'Saved.')})});
+function nice(s){return String(s).replace(/_/g,' ').replace(/^./,c=>c.toUpperCase())}function date(s){return s?new Date(s).toLocaleString('en-US',{timeZone:'America/New_York',dateStyle:'medium',timeStyle:'short'}):'—'}
+function bars(obj){const max=Math.max(1,...Object.values(obj));return Object.entries(obj).map(([k,v])=>'<div class="bar-row"><span>'+esc(nice(k))+'</span><div class="bar"><i style="width:'+Math.round(v/max*100)+'%"></i></div><b>'+v+'</b></div>').join('')||'<p class="muted">No activity yet.</p>'}
+async function adminStats(){const s=await rpc('apiAdminStats',adminToken);$('adminLogin').classList.add('hidden');$('dashboard').classList.remove('hidden');$('adminUpdated').textContent='Updated '+date(new Date())+' ET';const metrics=[['Registered users',s.usersTotal],['Upcoming trips',s.upcomingTrips],['Pending requests',s.requestsByStatus.pending||0],['Page visits',s.usageByAction.visit||0]];$('adminData').innerHTML='<div class="metrics">'+metrics.map(([k,v])=>'<div class="metric"><b>'+v+'</b>'+k+'</div>').join('')+'</div><div class="grid"><div class="panel"><h3>Seat requests</h3>'+bars(s.requestsByStatus)+'</div><div class="panel"><h3>Trip status</h3>'+bars(s.tripsByStatus)+'</div></div><div class="panel"><h3>Community members</h3><p class="muted">Self-entered names · '+s.usersTotal+' accounts</p><div class="table-wrap"><table><thead><tr><th>Name</th><th>Joined · ET</th><th>Last active · ET</th></tr></thead><tbody>'+s.users.map(u=>'<tr><td>'+esc(u.name)+'</td><td>'+esc(date(u.createdAt))+'</td><td>'+esc(date(u.lastSeenAt))+'</td></tr>').join('')+'</tbody></table></div></div><div class="grid"><div class="panel"><h3>Activity breakdown</h3>'+bars(s.usageByAction)+'</div><div class="panel"><h3>Identity breakdown</h3>'+bars(s.usageByIdentity)+'<p class="muted">Event counts, not unique visitors.</p></div></div><div class="panel"><h3>Recent activity</h3><div class="table-wrap"><table><thead><tr><th>Time · ET</th><th>Person</th><th>Action</th></tr></thead><tbody>'+s.recentUsage.map(r=>'<tr><td>'+esc(date(r.ts))+'</td><td>'+esc(r.actor||'Anonymous')+'</td><td>'+esc(nice(r.action))+'</td></tr>').join('')+'</tbody></table></div></div>';status('Dashboard updated.')}
+$('adminForm').onsubmit=e=>{e.preventDefault();action(e.submitter,'Opening…',async()=>{const d=await rpc('apiAdminLogin',$('adminPassword').value);$('adminPassword').value='';adminToken=d.adminToken;await adminStats()})};$('adminRefresh').onclick=e=>action(e.currentTarget,'Refreshing…',adminStats);$('adminLogout').onclick=()=>{adminToken='';$('adminData').innerHTML='';$('dashboard').classList.add('hidden');$('adminLogin').classList.remove('hidden')};
+const towns={potsdam:[44.6698,-74.9813],canton:[44.5956,-75.1691],watertown:[43.9748,-75.9108],syracuse:[43.0481,-76.1474],massena:[44.9281,-74.8919],ogdensburg:[44.6942,-75.4863],norwood:[44.7514,-74.9944],norfolk:[44.8009,-74.991],madrid:[44.7506,-75.131],malone:[44.8487,-74.2949],plattsburgh:[44.6995,-73.4529],albany:[42.6526,-73.7562],rochester:[43.1566,-77.6088],utica:[43.1009,-75.2327]};
+function locate(s){return towns[String(s).toLowerCase().trim().replace(/,?\s+(ny|new york)(,?\s+usa)?$/,'')]}
+function loadMap(){if(window.L)return Promise.resolve();if(mapPromise)return mapPromise;mapPromise=new Promise((resolve,reject)=>{const css=document.createElement('link');css.rel='stylesheet';css.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';document.head.append(css);const js=document.createElement('script');js.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';js.onload=resolve;js.onerror=()=>{mapPromise=null;js.remove();reject(Error('Map could not load. Check your connection and try again.'))};document.head.append(js)});return mapPromise}
+async function showMap(t){if(!t)return;$('routeTitle').textContent=t.origin+' to '+t.destination;$('routeDialog').showModal();if(map){map.remove();map=null}$('map').textContent='Loading map…';const a=locate(t.origin),b=locate(t.destination);if(!a||!b){$('map').textContent='Map preview is available for the North Country towns and cities suggested in the trip form.';$('mapNote').textContent='Your trip can still use any origin or destination.';return}$('mapNote').textContent='Town centers connected by a straight line. Approximate overview, not driving directions.';try{await loadMap();if(!$('routeDialog').open)return;$('map').textContent='';map=L.map('map',{scrollWheelZoom:false,zoomAnimation:false}).fitBounds([a,b],{padding:[35,35],maxZoom:11});L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',maxZoom:18}).addTo(map);L.polyline([a,b],{color:'#2463eb',weight:4,dashArray:'8 8'}).addTo(map);[a,b].forEach((p,i)=>L.circleMarker(p,{radius:7,color:'#12336a',fillColor:i?'#30c9b4':'#426bff',fillOpacity:1}).addTo(map).bindTooltip(esc(i?t.destination:t.origin)))}catch(e){$('map').textContent=e.message}}
+$('closeMap').onclick=()=>$('routeDialog').close();refresh();
+</script></body></html>

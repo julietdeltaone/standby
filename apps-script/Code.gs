@@ -67,10 +67,10 @@ function append_(tabName, obj) {
 function setCells_(tabName, rowNum, updates) {
   var sh = sheet_(tabName);
   var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
-  Object.keys(updates).forEach(function (k) {
-    var idx = head.indexOf(k);
-    if (idx >= 0) sh.getRange(rowNum, idx + 1).setValue(updates[k]);
-  });
+  var range = sh.getRange(rowNum, 1, 1, head.length);
+  var row = range.getValues()[0];
+  Object.keys(updates).forEach(function(k) { var idx = head.indexOf(k); if(idx >= 0) row[idx] = updates[k]; });
+  range.setValues([row]);
 }
 
 function hash_(s) {
@@ -95,7 +95,7 @@ function logUsage_(actor, identityType, action, detail) {
   } catch (e) { /* logging must never break the app */ }
 }
 
-function ok_(data) { return { ok: true, data: data }; }
+function ok_(data) { return { ok: true, data: JSON.parse(JSON.stringify(data)) }; }
 function err_(code, message) { return { ok: false, code: code, error: message }; }
 function wrap_(fn) { try { return fn(); } catch (e) { return err_('SERVER', String(e && e.message || e)); } }
 
@@ -106,7 +106,7 @@ function authUser_(token) {
   var users = rows_(TABS.users);
   for (var i = 0; i < users.length; i++) {
     if (users[i].token_hash === th) {
-      setCells_(TABS.users, users[i]._row, { last_seen_at: nowIso_() });
+      if (Date.now() - new Date(users[i].last_seen_at).getTime() > 300000) setCells_(TABS.users, users[i]._row, { last_seen_at: nowIso_() });
       return users[i];
     }
   }
@@ -121,7 +121,8 @@ function publicTrip_(t, myUserId, myReqByTrip) {
     mine: myUserId ? t.driver_user_id === myUserId : false,
     origin: t.origin,
     destination: t.destination,
-    departAt: t.depart_at,
+    departAt: new Date(t.depart_at).toISOString(),
+    departLocal: Utilities.formatDate(depart, TZ, "yyyy-MM-dd'T'HH:mm"),
     departDisplay: fmtDisplay_(depart),
     pickup: t.pickup,
     seatsTotal: Number(t.seats_total),
@@ -144,7 +145,7 @@ function doGet() {
 
 /* ---------------- users ---------------- */
 
-function apiRegister(name, pin) {
+function register_(name, pin) {
   return wrap_(function () {
     name = String(name || '').trim();
     pin = String(pin || '');
@@ -229,7 +230,7 @@ function apiCreateTrip(token, trip) {
     if (!origin || !destination) return err_('BAD_TRIP', 'Origin and destination are required.');
     if (isNaN(depart.getTime())) return err_('BAD_TRIP', 'Departure time is missing or invalid.');
     if (depart <= new Date()) return err_('PAST_DEPARTURE', 'Departure must be in the future.');
-    if (!(seats >= 1 && seats <= 8)) return err_('BAD_TRIP', 'Seats must be between 1 and 8.');
+    if (!(Number.isInteger(seats) && seats >= 1 && seats <= 8)) return err_('BAD_TRIP', 'Seats must be between 1 and 8.');
     var tripId = newId_('trp');
     append_(TABS.trips, {
       trip_id: tripId, driver_user_id: me.user_id, driver_name: me.display_name,
@@ -338,6 +339,7 @@ function apiDecideRequest(token, requestId, decision) {
       rows_(TABS.trips).forEach(function (x) { if (x.trip_id === r.trip_id) t = x; });
       if (!t) return err_('NOT_FOUND', 'Trip not found.');
       if (t.driver_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the driver can decide on this request.');
+      if (t.status !== 'open' || new Date(t.depart_at) <= new Date()) return err_('NOT_OPEN', 'This trip is no longer available.');
       if (r.status !== 'pending') return err_('NOT_PENDING', 'Request is no longer pending.');
       if (decision === 'approve') {
         if (Number(t.seats_taken) >= Number(t.seats_total)) return err_('TRIP_FULL', 'No seats left on this trip.');
@@ -360,7 +362,7 @@ function apiMyStuff(token) {
     var tripsById = {};
     rows_(TABS.trips).forEach(function (t) { tripsById[t.trip_id] = t; });
     var myTrips = rows_(TABS.trips)
-      .filter(function (t) { return t.driver_user_id === me.user_id; })
+      .filter(function (t) { return t.driver_user_id === me.user_id && t.status !== 'deleted'; })
       .sort(function (a, b) { return new Date(a.depart_at) - new Date(b.depart_at); })
       .map(function (t) {
         var p = publicTrip_(t, me.user_id, null);
@@ -371,7 +373,7 @@ function apiMyStuff(token) {
         return p;
       });
     var myRequests = reqs
-      .filter(function (r) { return r.rider_user_id === me.user_id; })
+      .filter(function (r) { return r.rider_user_id === me.user_id && r.status !== 'deleted'; })
       .sort(function (a, b) { return new Date(b.created_at) - new Date(a.created_at); })
       .map(function (r) {
         var t = tripsById[r.trip_id];
@@ -470,4 +472,67 @@ function setupSheet() {
   });
   PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', ss.getId());
   Logger.log('Created spreadsheet: ' + ss.getUrl());
+}
+
+/* Editing retains request history; deletion is recoverable in the private Sheet. */
+function apiEditTrip(token, tripId, trip) {
+  return wrap_(function () {
+    var me = authUser_(token);
+    if (!me) return err_('AUTH', 'Log in first.');
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
+    try {
+      var t = rows_(TABS.trips).filter(function (x) { return x.trip_id === tripId; })[0];
+      if (!t) return err_('NOT_FOUND', 'Trip not found.');
+      if (t.driver_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the driver can edit this trip.');
+      if (t.status !== 'open' || new Date(t.depart_at) <= new Date()) return err_('NOT_OPEN', 'Only upcoming open trips can be edited.');
+      trip = trip || {};
+      var seats = Number(trip.seatsTotal);
+      var depart = Utilities.parseDate(String(trip.departLocal || ''), TZ, "yyyy-MM-dd'T'HH:mm");
+      var origin = String(trip.origin || '').trim(), destination = String(trip.destination || '').trim();
+      if (!origin || !destination || origin.length > 120 || destination.length > 120) return err_('BAD_TRIP', 'Enter an origin and destination (up to 120 characters).');
+      if (!Number.isInteger(seats) || seats < 1 || seats > 8 || seats < Number(t.seats_taken)) return err_('BAD_TRIP', 'Seats must be 1–8 and include all approved riders.');
+      if (isNaN(depart.getTime()) || depart <= new Date()) return err_('BAD_TRIP', 'Choose a future departure.');
+      setCells_(TABS.trips, t._row, { origin: origin, destination: destination, depart_at: depart.toISOString(), pickup: String(trip.pickup || '').trim().slice(0,300), note: String(trip.note || '').trim().slice(0,600), seats_total: seats, updated_at: nowIso_() });
+      logUsage_(me.display_name, 'self-entered', 'edit_trip', tripId);
+      return ok_({tripId: tripId});
+    } finally { lock.releaseLock(); }
+  });
+}
+function apiDeleteTrip(token, tripId) {
+  return wrap_(function () {
+    var me = authUser_(token);
+    if (!me) return err_('AUTH', 'Log in first.');
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
+    try {
+      var t = rows_(TABS.trips).filter(function (x) { return x.trip_id === tripId; })[0];
+      if (!t) return err_('NOT_FOUND', 'Trip not found.');
+      if (t.driver_user_id !== me.user_id) return err_('NOT_OWNER', 'Only the driver can delete this trip.');
+      setCells_(TABS.trips,t._row,{status:'deleted',seats_taken:0,updated_at:nowIso_()});
+      rows_(TABS.requests).forEach(function(r){ if(r.trip_id===tripId && (r.status==='pending'||r.status==='approved')) setCells_(TABS.requests,r._row,{status:'cancelled',decided_at:nowIso_()}); });
+      logUsage_(me.display_name,'self-entered','delete_trip',tripId);
+      return ok_({tripId:tripId});
+    } finally { lock.releaseLock(); }
+  });
+}
+function apiChangePin(token, currentPin, newPin) {
+  return wrap_(function () {
+    var lock = LockService.getScriptLock(); lock.waitLock(15000);
+    try {
+      var me=authUser_(token);
+      if(!me) return err_('AUTH','Log in first.');
+      if(me.pin_hash!==hash_(me.salt+':'+String(currentPin||''))) return err_('BAD_PIN','Current PIN is incorrect.');
+      newPin=String(newPin||'');
+      if(newPin.length<4||newPin.length>32) return err_('BAD_PIN','Use 4 to 32 characters.');
+      var salt=Utilities.getUuid(), next=newToken_();
+      setCells_(TABS.users,me._row,{salt:salt,pin_hash:hash_(salt+':'+newPin),token_hash:hash_(next)});
+      return ok_({token:next});
+    } finally { lock.releaseLock(); }
+  });
+}
+
+function apiRegister(name, pin) {
+  return wrap_(function() {
+    var lock=LockService.getScriptLock(); lock.waitLock(15000);
+    try { return register_(name,pin); } finally { lock.releaseLock(); }
+  });
 }
